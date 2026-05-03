@@ -187,7 +187,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         },
         "branding": {
             "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+            "welcome": "歡迎使用 Hermes Agent！請輸入訊息，或輸入 /help 查看指令。",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Hermes ",
             "prompt_symbol": "❯",
@@ -298,7 +298,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "spinner": {},
         "branding": {
             "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+            "welcome": "歡迎使用 Hermes Agent！請輸入訊息，或輸入 /help 查看指令。",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Hermes ",
             "prompt_symbol": "❯",
@@ -337,7 +337,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "spinner": {},
         "branding": {
             "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+            "welcome": "歡迎使用 Hermes Agent！請輸入訊息，或輸入 /help 查看指令。",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Hermes ",
             "prompt_symbol": "❯",
@@ -374,7 +374,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "spinner": {},
         "branding": {
             "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+            "welcome": "歡迎使用 Hermes Agent！請輸入訊息，或輸入 /help 查看指令。",
             "goodbye": "Goodbye! ⚕",
             "response_label": " ⚕ Hermes ",
             "prompt_symbol": "❯",
@@ -411,7 +411,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "spinner": {},
         "branding": {
             "agent_name": "Hermes Agent",
-            "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
+            "welcome": "歡迎使用 Hermes Agent！請輸入訊息，或輸入 /help 查看指令。",
             "goodbye": "Goodbye! \u2695",
             "response_label": " \u2695 Hermes ",
             "prompt_symbol": "\u276f",

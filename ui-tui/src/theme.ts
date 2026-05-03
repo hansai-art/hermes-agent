@@ -238,7 +238,7 @@ const BRAND: ThemeBrand = {
   name: 'Hermes Agent',
   icon: '⚕',
   prompt: '❯',
-  welcome: 'Type your message or /help for commands.',
+  welcome: '歡迎使用 Hermes Agent！請輸入訊息，或輸入 /help 查看指令。',
   goodbye: 'Goodbye! ⚕',
   tool: '┊',
   helpHeader: '(^_^)? Commands'
