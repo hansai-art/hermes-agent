@@ -1105,6 +1105,16 @@ DEFAULT_CONFIG = {
         "mcp_reload_confirm": True,
     },
 
+    # User-defined hard deny rules for terminal commands. These regex rules
+    # are evaluated after HARDLINE_PATTERNS but before --yolo, approvals.mode=off,
+    # smart approval, session approval, or command_allowlist. Use this for
+    # personal "never let the agent run this" policies.
+    "permissions": {
+        "rules": {
+            "deny": [],
+        },
+    },
+
     # Permanently allowed dangerous command patterns (added via "always" approval)
     "command_allowlist": [],
     # User-defined quick commands that bypass the agent loop (type: exec only)

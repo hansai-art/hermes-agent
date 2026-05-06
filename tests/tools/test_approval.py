@@ -28,6 +28,65 @@ class TestApprovalModeParsing:
             assert _get_approval_mode() == "off"
 
 
+class TestUserDenyRules:
+    def test_permissions_rules_deny_blocks_before_yolo(self):
+        config = {
+            "permissions": {
+                "rules": {
+                    "deny": [
+                        {
+                            "pattern": r"\brm\s+-[^\s]*r",
+                            "reason": "recursive delete blocked by user policy",
+                        }
+                    ]
+                }
+            }
+        }
+        with mock_patch("hermes_cli.config.load_config", return_value=config), \
+             mock_patch.dict("os.environ", {"HERMES_YOLO_MODE": "1"}, clear=False):
+            result = approval_module.check_all_command_guards("rm -rf ./build", "local")
+
+        assert result["approved"] is False
+        assert result.get("user_deny") is True
+        assert "user policy" in result["message"].lower()
+
+    def test_permissions_rules_deny_blocks_before_permanent_allowlist(self):
+        config = {
+            "permissions": {
+                "rules": {
+                    "deny": [
+                        {
+                            "pattern": r"\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)",
+                            "reason": "shell -c blocked by user policy",
+                        }
+                    ]
+                }
+            }
+        }
+        with mock_patch("hermes_cli.config.load_config", return_value=config), \
+             mock_patch.object(approval_module, "_permanent_approved", {"shell command via -c/-lc flag"}):
+            result = approval_module.check_all_command_guards("bash -c 'echo hi'", "local")
+
+        assert result["approved"] is False
+        assert result.get("user_deny") is True
+        assert "shell -c blocked" in result["message"].lower()
+
+    def test_permissions_rules_deny_accepts_string_entries(self):
+        config = {"permissions": {"rules": {"deny": [r"\bfind\b.*-delete\b"]}}}
+        with mock_patch("hermes_cli.config.load_config", return_value=config):
+            result = approval_module.check_all_command_guards("find . -name '*.tmp' -delete", "local")
+
+        assert result["approved"] is False
+        assert result.get("user_deny") is True
+
+    def test_permissions_rules_deny_ignores_invalid_regex_entries(self):
+        config = {"permissions": {"rules": {"deny": [{"pattern": "["}]}}}
+        with mock_patch("hermes_cli.config.load_config", return_value=config):
+            result = approval_module.check_all_command_guards("echo safe", "local")
+
+        assert result["approved"] is True
+
+
 class TestSmartApproval:
     def test_smart_approval_uses_call_llm(self):
         response = SimpleNamespace(

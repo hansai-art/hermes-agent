@@ -193,6 +193,74 @@ def detect_hardline_command(command: str) -> tuple:
     return (False, None)
 
 
+def _load_user_deny_rules() -> list[tuple[str, str]]:
+    """Load user-configured permissions.rules.deny regex rules.
+
+    Supported entries:
+    - string: treated as the regex pattern; generic reason is used
+    - dict: {pattern: "...", reason: "..."}
+
+    Invalid entries are ignored fail-closed for availability: a typo should not
+    break all terminal use. Regex errors are logged so config can be corrected.
+    """
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except Exception as exc:
+        logger.warning("Failed to load permissions deny rules: %s", exc)
+        return []
+
+    raw_rules = cfg_get(config, "permissions", "rules", "deny", default=[])
+    if not isinstance(raw_rules, list):
+        return []
+
+    rules: list[tuple[str, str]] = []
+    for entry in raw_rules:
+        pattern = ""
+        reason = "blocked by user deny rule"
+        if isinstance(entry, str):
+            pattern = entry
+        elif isinstance(entry, dict):
+            pattern = str(entry.get("pattern") or "")
+            reason = str(entry.get("reason") or reason)
+        if not pattern:
+            continue
+        try:
+            re.compile(pattern, _RE_FLAGS)
+        except re.error as exc:
+            logger.warning("Ignoring invalid permissions.rules.deny regex %r: %s", pattern, exc)
+            continue
+        rules.append((pattern, reason))
+    return rules
+
+
+def detect_user_denied_command(command: str) -> tuple:
+    """Check user-configured deny rules that cannot be bypassed by yolo.
+
+    Returns:
+        (is_denied, description) or (False, None)
+    """
+    normalized = _normalize_command_for_detection(command)
+    for pattern, reason in _load_user_deny_rules():
+        if re.search(pattern, normalized, _RE_FLAGS):
+            return (True, reason)
+    return (False, None)
+
+
+def _user_deny_block_result(description: str) -> dict:
+    """Build the standard block result for a user-configured deny match."""
+    return {
+        "approved": False,
+        "user_deny": True,
+        "message": (
+            f"BLOCKED (user deny rule): {description}. "
+            "This command matched permissions.rules.deny and cannot be "
+            "executed via the agent, even with --yolo, /yolo, "
+            "approvals.mode=off, smart approval, or permanent allowlist."
+        ),
+    }
+
+
 def _hardline_block_result(description: str) -> dict:
     """Build the standard block result for a hardline match."""
     return {
@@ -802,6 +870,11 @@ def check_dangerous_command(command: str, env_type: str,
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
         return _hardline_block_result(hardline_desc)
 
+    is_user_denied, user_deny_desc = detect_user_denied_command(command)
+    if is_user_denied:
+        logger.warning("User deny rule block: %s (command: %s)", user_deny_desc, command[:200])
+        return _user_deny_block_result(user_deny_desc)
+
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
     if is_truthy_value(os.getenv("HERMES_YOLO_MODE")) or is_current_session_yolo_enabled():
@@ -925,6 +998,11 @@ def check_all_command_guards(command: str, env_type: str,
     if is_hardline:
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
         return _hardline_block_result(hardline_desc)
+
+    is_user_denied, user_deny_desc = detect_user_denied_command(command)
+    if is_user_denied:
+        logger.warning("User deny rule block: %s (command: %s)", user_deny_desc, command[:200])
+        return _user_deny_block_result(user_deny_desc)
 
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
