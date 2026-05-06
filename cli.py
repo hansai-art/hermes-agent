@@ -8401,6 +8401,19 @@ class HermesCLI:
             if not tts_text:
                 return
 
+            # Optional: speak only the first N sentences so voice feedback stays brief.
+            # 0 or missing keeps the previous behavior.
+            try:
+                from hermes_cli.config import load_config
+                voice_cfg = load_config().get("voice", {})
+                max_sentences = int(voice_cfg.get("tts_max_sentences", 0) or 0)
+            except Exception:
+                max_sentences = 0
+            if max_sentences > 0:
+                sentence_matches = re.findall(r'.+?(?:[。！？!?]+|[.!?]+(?=\s|$))', tts_text, flags=re.S)
+                if sentence_matches:
+                    tts_text = ''.join(sentence_matches[:max_sentences]).strip()
+
             # Use MP3 output for CLI playback (afplay doesn't handle OGG well).
             # The TTS tool may auto-convert MP3->OGG, but the original MP3 remains.
             os.makedirs(os.path.join(tempfile.gettempdir(), "hermes_voice"), exist_ok=True)
