@@ -2295,6 +2295,148 @@ class TestRunConversation:
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
 
+    def test_loop_watchdog_injects_once_near_budget_after_tool_result(self, agent):
+        self._setup_agent(agent)
+        agent.max_iterations = 3
+        agent._loop_watchdog_min_iterations = 1
+        agent._loop_watchdog_threshold_remaining = 1
+        status_events = []
+        agent.status_callback = lambda kind, message: status_events.append((kind, message))
+
+        tc1 = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments="{}", call_id="c2")
+        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc1])
+        resp2 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc2])
+        resp3 = _mock_response(content="Done searching", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [resp1, resp2, resp3]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search something")
+
+        assert result["final_response"] == "Done searching"
+        assert agent._loop_watchdog_injected is True
+        final_request = agent.client.chat.completions.create.call_args_list[-1].kwargs["messages"]
+        watchdog_indexes = [
+            idx for idx, msg in enumerate(final_request)
+            if msg.get("role") == "user" and "Loop progress guard" in msg.get("content", "")
+        ]
+        assert len(watchdog_indexes) == 1
+        watchdog_message = final_request[watchdog_indexes[0]]
+        assert "收斂提示" in watchdog_message["content"]
+        assert "Continue essential tool calls" in watchdog_message["content"]
+        assert "avoid exploratory loops" in watchdog_message["content"]
+        tool_indexes_before_watchdog = [
+            idx for idx, msg in enumerate(final_request[:watchdog_indexes[0]])
+            if msg.get("role") == "tool"
+        ]
+        assert tool_indexes_before_watchdog
+        assert final_request[watchdog_indexes[0] - 1]["role"] == "tool"
+        assert final_request[watchdog_indexes[0] - 1].get("tool_call_id") in {"c1", "c2"}
+        assert any(kind == "lifecycle" and "Loop progress guard activated" in message
+                   for kind, message in status_events)
+
+    def test_loop_watchdog_does_not_inject_when_last_message_is_not_tool(self, agent):
+        agent.max_iterations = 3
+        agent._loop_watchdog_min_iterations = 1
+        agent._loop_watchdog_threshold_remaining = 1
+        messages = [{"role": "user", "content": "still thinking"}]
+
+        assert agent._maybe_inject_loop_watchdog(messages, api_call_count=2) is False
+        assert len(messages) == 1
+        assert agent._loop_watchdog_injected is False
+
+    def test_loop_watchdog_reads_agent_namespace_and_false_values(self):
+        configs = [
+            {"agent": {"loop_watchdog": {"enabled": "false"}}},
+            {"agent": {"loop_watchdog": False}},
+            {"loop_watchdog": False},
+            {"agent_loop_watchdog": False},
+        ]
+        merged_default = {"agent": {"loop_watchdog": {"enabled": True}}}
+
+        for cfg in configs:
+            with (
+                patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+                patch("run_agent.check_toolset_requirements", return_value={}),
+                patch("run_agent.OpenAI"),
+                patch("hermes_cli.config.load_config", return_value=merged_default),
+                patch("run_agent.read_raw_config", return_value=cfg),
+            ):
+                configured = AIAgent(
+                    api_key="test-key-1234567890",
+                    base_url="https://openrouter.ai/api/v1",
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=True,
+                )
+
+            assert configured._loop_watchdog_enabled is False
+
+    def test_loop_watchdog_uses_merged_default_when_no_raw_override(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={"agent": {"loop_watchdog": {"enabled": True}}}),
+            patch("run_agent.read_raw_config", return_value={}),
+        ):
+            configured = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert configured._loop_watchdog_enabled is True
+
+    def test_loop_watchdog_preserves_parallel_tool_call_ordering(self, agent):
+        self._setup_agent(agent)
+        agent.max_iterations = 2
+        agent._loop_watchdog_min_iterations = 1
+        agent._loop_watchdog_threshold_remaining = 1
+        agent.valid_tool_names.add("other_search")
+
+        tc1 = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        tc2 = _mock_tool_call(name="other_search", arguments="{}", call_id="c2")
+        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc1, tc2])
+        resp2 = _mock_response(content="Done", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [resp1, resp2]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search in parallel")
+
+        assert result["final_response"] == "Done"
+        final_request = agent.client.chat.completions.create.call_args_list[-1].kwargs["messages"]
+        watchdog_index = next(
+            idx for idx, msg in enumerate(final_request)
+            if msg.get("role") == "user" and "Loop progress guard" in msg.get("content", "")
+        )
+        prior_tool_call_ids = [
+            msg.get("tool_call_id") for msg in final_request[:watchdog_index]
+            if msg.get("role") == "tool"
+        ]
+        assert prior_tool_call_ids[-2:] == ["c1", "c2"]
+
+    def test_loop_watchdog_threshold_defaults_to_late_guard(self, agent):
+        agent.max_iterations = 90
+        agent._loop_watchdog_enabled = True
+        agent._loop_watchdog_min_iterations = 10
+        agent._loop_watchdog_threshold_remaining = None
+        agent._loop_watchdog_threshold_fraction = 0.10
+
+        assert agent._loop_watchdog_threshold() == 5
+
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

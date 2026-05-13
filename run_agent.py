@@ -173,8 +173,8 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
-from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
-from hermes_cli.config import cfg_get
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, is_truthy_value, normalize_proxy_url
+from hermes_cli.config import cfg_get, read_raw_config
 
 
 
@@ -1236,14 +1236,65 @@ class AIAgent:
         except Exception:
             pass
 
-        # Iteration budget: the LLM is only notified when it actually exhausts
-        # the iteration budget (api_call_count >= max_iterations).  At that
-        # point we inject ONE message, allow one final API call, and if the
-        # model doesn't produce a text response, force a user-message asking
-        # it to summarise.  No intermediate pressure warnings — they caused
-        # models to "give up" prematurely on complex tasks (#7915).
+        # Iteration budget: the LLM is always notified when it actually
+        # exhausts the iteration budget (api_call_count >= max_iterations).
+        # Near the end of the budget, a low-pressure loop watchdog may also
+        # inject ONE convergence hint after a tool result.  It is intentionally
+        # late and one-shot to avoid the premature "give up" behavior that
+        # broad intermediate pressure warnings caused on complex tasks (#7915).
         self._budget_exhausted_injected = False
         self._budget_grace_call = False
+        self._loop_watchdog_injected = False
+        self._loop_watchdog_enabled = True
+        self._loop_watchdog_min_iterations = 10
+        self._loop_watchdog_threshold_remaining = None
+        self._loop_watchdog_threshold_fraction = 0.10
+        try:
+            from hermes_cli.config import load_config as _load_loop_watchdog_cfg
+
+            _cfg_root = _load_loop_watchdog_cfg() or {}
+            _raw_cfg_root = read_raw_config() or {}
+
+            def _first_config_value(*sources):
+                for source, keys in sources:
+                    if not isinstance(source, dict):
+                        continue
+                    for key in keys:
+                        if key in source:
+                            return source[key]
+                return None
+
+            _raw_agent_cfg = _raw_cfg_root.get("agent", {}) if isinstance(_raw_cfg_root, dict) else {}
+            _agent_cfg = _cfg_root.get("agent", {}) if isinstance(_cfg_root, dict) else {}
+            _lw_cfg = _first_config_value(
+                (_raw_agent_cfg, ("loop_watchdog", "loop_progress_guard")),
+                (_raw_cfg_root, ("loop_watchdog", "loop_progress_guard", "agent_loop_watchdog")),
+                (_agent_cfg, ("loop_watchdog", "loop_progress_guard")),
+                (_cfg_root, ("loop_watchdog", "loop_progress_guard", "agent_loop_watchdog")),
+            )
+            if _lw_cfg is None:
+                _lw_cfg = {}
+            if isinstance(_lw_cfg, bool):
+                self._loop_watchdog_enabled = _lw_cfg
+            elif isinstance(_lw_cfg, str):
+                self._loop_watchdog_enabled = is_truthy_value(_lw_cfg, default=True)
+            elif isinstance(_lw_cfg, dict):
+                if "enabled" in _lw_cfg:
+                    self._loop_watchdog_enabled = is_truthy_value(_lw_cfg.get("enabled"), default=True)
+                _min_iters = _lw_cfg.get("min_iterations", _lw_cfg.get("minimum_iterations"))
+                if _min_iters is not None:
+                    self._loop_watchdog_min_iterations = max(1, int(_min_iters))
+                _threshold = _lw_cfg.get(
+                    "threshold_remaining",
+                    _lw_cfg.get("remaining_iterations", _lw_cfg.get("remaining")),
+                )
+                if _threshold is not None:
+                    self._loop_watchdog_threshold_remaining = max(1, int(_threshold))
+                _fraction = _lw_cfg.get("threshold_fraction", _lw_cfg.get("threshold_ratio"))
+                if _fraction is not None:
+                    self._loop_watchdog_threshold_fraction = max(0.0, min(1.0, float(_fraction)))
+        except Exception:
+            pass
 
         # Activity tracking — updated on each API call, tool execution, and
         # stream chunk.  Used by the gateway timeout handler to report what the
@@ -2526,6 +2577,60 @@ class AIAgent:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    def _loop_watchdog_threshold(self) -> int:
+        """Return remaining-iteration threshold for the loop progress guard."""
+        if not self._loop_watchdog_enabled or self.max_iterations < self._loop_watchdog_min_iterations:
+            return 0
+        if self._loop_watchdog_threshold_remaining is not None:
+            return max(1, min(self.max_iterations - 1, self._loop_watchdog_threshold_remaining))
+        fraction = self._loop_watchdog_threshold_fraction
+        derived = int(self.max_iterations * fraction + 0.999)
+        # Default to a very-late warning: at most the last five iterations,
+        # or roughly the last 10% for smaller budgets.
+        return max(1, min(self.max_iterations - 1, min(5, derived)))
+
+    def _maybe_inject_loop_watchdog(self, messages: list, api_call_count: int) -> bool:
+        """Inject a one-shot convergence hint when a tool loop is near budget.
+
+        The hint is appended only after a tool result, so first-turn/simple
+        requests are unaffected and the model sees it before the next API call.
+        """
+        if self._loop_watchdog_injected or self._budget_grace_call:
+            return False
+        threshold = self._loop_watchdog_threshold()
+        if threshold <= 0:
+            return False
+        try:
+            remaining = min(self.max_iterations - api_call_count, self.iteration_budget.remaining)
+        except Exception:
+            remaining = self.max_iterations - api_call_count
+        if remaining > threshold:
+            return False
+        if not messages or messages[-1].get("role") != "tool":
+            return False
+
+        prompt = (
+            "Loop progress guard / 收斂提示: the iteration budget is nearly exhausted "
+            f"({remaining} remaining). Continue essential tool calls if they are "
+            "needed to finish correctly, but avoid exploratory loops. If no more "
+            "tool calls are essential, provide the best final answer now, including "
+            "completed work, current findings, and any remaining blockers."
+        )
+        messages.append({"role": "user", "content": prompt})
+        self._loop_watchdog_injected = True
+        self._emit_status(
+            f"⏱ Loop progress guard activated ({api_call_count}/{self.max_iterations}; "
+            f"{remaining} remaining)"
+        )
+        logger.info(
+            "loop progress guard injected: api_calls=%d max_iterations=%d remaining=%d session=%s",
+            api_call_count,
+            self.max_iterations,
+            remaining,
+            self.session_id or "none",
+        )
+        return True
 
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
@@ -10400,6 +10505,7 @@ class AIAgent:
         self._unicode_sanitization_passes = 0
         self._tool_guardrails.reset_for_turn()
         self._tool_guardrail_halt_decision = None
+        self._loop_watchdog_injected = False
 
         # Pre-turn connection health check: detect and clean up dead TCP
         # connections left over from provider outages or dropped streams.
@@ -10717,6 +10823,8 @@ class AIAgent:
                 if not self.quiet_mode:
                     self._safe_print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
                 break
+
+            self._maybe_inject_loop_watchdog(messages, api_call_count)
 
             # Fire step_callback for gateway hooks (agent:step event)
             if self.step_callback is not None:

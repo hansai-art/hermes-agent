@@ -457,6 +457,17 @@ DEFAULT_CONFIG = {
         # remains available as a tool regardless of this setting — the routing
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
+        # Loop progress guard: a one-shot late hint injected after a tool result
+        # when a tool loop is close to exhausting max_turns. This does not stop
+        # the agent; it asks the model to converge and avoid exploratory loops.
+        "loop_watchdog": {
+            "enabled": True,
+            "min_iterations": 10,
+            "threshold_fraction": 0.10,
+            # Optional explicit override. When null, Hermes uses the smaller of
+            # the final 10% or the final 5 iterations.
+            "threshold_remaining": None,
+        },
         "disabled_toolsets": [],
     },
     
