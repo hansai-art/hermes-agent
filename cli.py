@@ -62,6 +62,70 @@ except (ImportError, AttributeError):
 import threading
 import queue
 
+
+def _is_broken_terminal_io_error(exc: BaseException) -> bool:
+    """Return True for terminal I/O errors that are safe to suppress.
+
+    prompt_toolkit may try to redraw or reset the terminal while the parent
+    terminal/PTY is already gone (SSH logout, killed tmux pane, closed pipe,
+    interrupt during shutdown).  In that state the user cannot see the redraw
+    anyway, and surfacing the exception as an asyncio shutdown traceback makes
+    the CLI look like it crashed silently.  Only suppress the narrow stdout/PTY
+    failure modes; unrelated OSError variants must still propagate.
+    """
+
+    if isinstance(exc, BrokenPipeError):
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    if getattr(exc, "errno", None) in {errno.EIO, errno.EPIPE, errno.EBADF}:
+        return True
+    text = str(exc)
+    return (
+        "Input/output error" in text
+        or "Broken pipe" in text
+        or "Bad file descriptor" in text
+    )
+
+
+def _install_prompt_toolkit_output_guard() -> None:
+    """Suppress prompt_toolkit stdout flush failures during shutdown.
+
+    The asyncio exception handler below catches EIO when the exception reaches
+    the loop handler, but prompt_toolkit can also raise while cancelling and
+    resetting its Application.  Patching the vt100 flush hook is a tighter guard:
+    it swallows only broken-terminal flush errors and lets all other exceptions
+    bubble normally.
+    """
+
+    try:
+        import prompt_toolkit.output.flush_stdout as _pt_flush_module
+        import prompt_toolkit.output.vt100 as _pt_vt100
+    except Exception:
+        return
+
+    current = getattr(_pt_vt100, "flush_stdout", None)
+    if current is None or getattr(current, "_hermes_broken_io_guard", False):
+        return
+
+    original = current
+
+    def _guarded_flush_stdout(stdout, data):
+        try:
+            return original(stdout, data)
+        except (BrokenPipeError, OSError) as exc:
+            if _is_broken_terminal_io_error(exc):
+                return None
+            raise
+
+    _guarded_flush_stdout._hermes_broken_io_guard = True  # type: ignore[attr-defined]
+    _guarded_flush_stdout._hermes_original = original  # type: ignore[attr-defined]
+    _pt_vt100.flush_stdout = _guarded_flush_stdout
+    # Patch the defining module as well for any future imports that do not go
+    # through prompt_toolkit.output.vt100.
+    _pt_flush_module.flush_stdout = _guarded_flush_stdout
+
+
 from agent.usage_pricing import (
     CanonicalUsage,
     estimate_usage_cost,
@@ -11660,8 +11724,8 @@ class HermesCLI:
                 return  # silently suppress
             if isinstance(exc, KeyError) and "is not registered" in str(exc):
                 return  # suppress selector registration failures (#6393)
-            if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EIO:
-                return  # suppress I/O errors from broken stdout on interrupt (#13710)
+            if _is_broken_terminal_io_error(exc):
+                return  # suppress broken stdout/PTY errors on interrupt (#13710)
             # Fall back to default handler for everything else
             loop.default_exception_handler(context)
 
@@ -11681,6 +11745,7 @@ class HermesCLI:
             return
 
         # Run the application with patch_stdout for proper output handling
+        _install_prompt_toolkit_output_guard()
         try:
             with patch_stdout():
                 # Set the custom handler on prompt_toolkit's event loop
@@ -11696,9 +11761,9 @@ class HermesCLI:
         except (KeyError, OSError) as _stdin_err:
             # Catch selector registration failures from broken stdin (#6393)
             # and I/O errors from broken stdout during interrupt (#13710).
-            if isinstance(_stdin_err, OSError) and getattr(_stdin_err, "errno", None) == errno.EIO:
-                pass  # suppress broken-stdout I/O errors on interrupt (#13710)
-            elif "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+            if _is_broken_terminal_io_error(_stdin_err):
+                pass  # suppress broken stdout/PTY errors on interrupt (#13710)
+            elif "is not registered" in str(_stdin_err):
                 print(
                     f"\nError: stdin is not usable ({_stdin_err}).\n"
                     "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"

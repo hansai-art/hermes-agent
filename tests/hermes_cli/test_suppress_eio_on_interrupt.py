@@ -18,6 +18,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cli import _install_prompt_toolkit_output_guard, _is_broken_terminal_io_error
+
 
 # ---------------------------------------------------------------------------
 # _suppress_closed_loop_errors – asyncio exception handler
@@ -36,7 +38,7 @@ def _make_suppress_fn():
             return
         if isinstance(exc, KeyError) and "is not registered" in str(exc):
             return
-        if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EIO:
+        if _is_broken_terminal_io_error(exc):
             return
         loop.default_exception_handler(context)
     return _suppress_closed_loop_errors
@@ -113,3 +115,52 @@ class TestOuterExceptEIO:
         assert not (getattr(exc, "errno", None) == errno.EIO)
         assert "is not registered" not in str(exc)
         assert "Bad file descriptor" not in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# prompt_toolkit vt100 flush guard
+# ---------------------------------------------------------------------------
+
+class TestPromptToolkitFlushGuard:
+    """Verify the vt100 flush monkeypatch catches shutdown-only I/O errors."""
+
+    def test_broken_terminal_error_predicate(self):
+        assert _is_broken_terminal_io_error(OSError(errno.EIO, "Input/output error"))
+        assert _is_broken_terminal_io_error(OSError(errno.EPIPE, "Broken pipe"))
+        assert _is_broken_terminal_io_error(OSError(errno.EBADF, "Bad file descriptor"))
+        assert _is_broken_terminal_io_error(BrokenPipeError(errno.EPIPE, "Broken pipe"))
+        assert not _is_broken_terminal_io_error(OSError(errno.EACCES, "Permission denied"))
+        assert not _is_broken_terminal_io_error(ValueError("Input/output error"))
+
+    def test_guard_suppresses_eio_and_reraises_other_oserror(self):
+        import prompt_toolkit.output.flush_stdout as flush_module
+        import prompt_toolkit.output.vt100 as vt100
+
+        orig_vt100 = vt100.flush_stdout
+        orig_module = flush_module.flush_stdout
+        calls = []
+
+        def fake_flush(_stdout, data):
+            calls.append(data)
+            if data == "eio":
+                raise OSError(errno.EIO, "Input/output error")
+            if data == "denied":
+                raise OSError(errno.EACCES, "Permission denied")
+            return "ok"
+
+        try:
+            vt100.flush_stdout = fake_flush
+            flush_module.flush_stdout = fake_flush
+            _install_prompt_toolkit_output_guard()
+
+            assert getattr(vt100.flush_stdout, "_hermes_broken_io_guard", False)
+            assert flush_module.flush_stdout is vt100.flush_stdout
+            assert vt100.flush_stdout(None, "ok") == "ok"
+            assert vt100.flush_stdout(None, "eio") is None
+            with pytest.raises(OSError) as excinfo:
+                vt100.flush_stdout(None, "denied")
+            assert getattr(excinfo.value, "errno", None) == errno.EACCES
+            assert calls == ["ok", "eio", "denied"]
+        finally:
+            vt100.flush_stdout = orig_vt100
+            flush_module.flush_stdout = orig_module
