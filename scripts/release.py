@@ -683,6 +683,15 @@ AUTHOR_MAP = {
     "redpiggy-cyber@users.noreply.github.com": "redpiggy-cyber",
     "roadhero@users.noreply.github.com": "roadhero",
     "vinoth12940@users.noreply.github.com": "vinoth12940",
+    # Resolved via GitHub commits API (author.login on the linked commit),
+    # not guessed from display name — e.g. git@hode.co.uk shows as "Harry
+    # Yep" but resolves to account "okisdev".
+    "gigakun@agentmail.to": "gigakun3030",
+    "git@hode.co.uk": "okisdev",
+    "markvlcek@gmail.com": "MarkVLK",
+    "jakub.wolniewicz@gmail.com": "frizikk",
+    # agent@agents-Mac-mini.local: no linked GitHub account found via the
+    # commits API or user search — left unmapped rather than guessed.
 }
 
 
